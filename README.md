@@ -43,17 +43,25 @@ uv run client.py
 uv run chat
 ```
 
+Au lancement interactif, un prompt vous invite à confirmer ou personnaliser l'URL du serveur (appuyez sur `Entrée` pour garder l'adresse par défaut `http://localhost:8000/v1`).
+
 ---
 
 ## 🌟 Fonctionnalités
 
-- **Streaming en direct** : Réception et affichage des tokens au fur et à mesure sans délai.
-- **Auto-détection du modèle** : Détecte automatiquement le modèle chargé sur `http://localhost:8000/v1` (fallback sur `Qwen/Qwen3.8-27B`).
-- **Métriques en temps réel** : Affiche la latence (TTFT - *Time To First Token*), la vitesse de génération en **tokens/seconde** (`tok/s`) et le nombre total de tokens.
-- **Historique interactif** : Mémorise le contexte de la discussion, navigation avec les flèches Haut/Bas, et persistance dans `~/.vllm_client_history`.
-- **Commandes slash intégrées** : Autocomplétion avec `Tab` pour toutes les commandes (`/help`, `/clear`, etc.).
-- **Mode multi-lignes** : Collez directement du code ou des textes longs, ou basculez en mode multi-lignes avec `/multiline` (envoi avec `Esc + Entrée` ou `Alt + Entrée`).
-- **Support des pipes et requêtes directes** :
+- **Formatage ANSI & Markdown en direct** :
+  - **Réflexion en gris** : Les blocs de raisonnement `<think>...</think>` (ou `reasoning_content`) s'affichent en **gris** (`\033[90m`) sous un en-tête `💭 [Réflexion]`, avant de basculer sur `💡 [Réponse]`.
+  - **Gras & styles Markdown** : `**texte en gras**` mis en valeur avec ANSI bold, code inline `` `code` ``, titres `#`, `##`, `###` colorés, puces `•`, et blocs de code encadrés avec coloration syntaxique.
+- **Invite de configuration de l'URL au démarrage** :
+  - Vous pouvez valider l'URL par défaut avec `Entrée` ou entrer une IP/port sur votre réseau local (`http://192.168.1.50:8000`).
+  - L'URL est automatiquement mémorisée dans le fichier `.env`.
+  - La commande `/url` permet aussi de changer de serveur à chaud pendant la session.
+- **Streaming ultra-fluide** : Affichage token par token sans saccades ni duplication de lignes.
+- **Auto-détection du modèle** : Détecte automatiquement le modèle chargé sur votre instance vLLM (fallback sur `Qwen/Qwen3.8-27B`).
+- **Métriques de performance** : Affiche à chaque fin de réponse le **TTFT** (*Time To First Token*), la vitesse en **tokens/seconde** (`tok/s`) et le total de tokens.
+- **Historique & saisie riche** : Mémorisation du contexte, navigation avec flèches `Haut`/`Bas`, persistance dans `~/.vllm_client_history`.
+- **Mode multi-lignes** : Collez du texte long directement ou activez `/multiline` (`Esc + Entrée` pour envoyer).
+- **Requêtes directes & pipes Unix** :
   ```bash
   # Requête one-shot
   uv run client.py -p "Explique-moi la différence entre un thread et un processus."
@@ -71,9 +79,10 @@ Tapez ces commandes directement à l'invite `Vous > ` :
 | Commande | Description |
 |---|---|
 | `/help` | Affiche l'aide des commandes |
+| `/url [lien]` | Affiche ou modifie l'URL du serveur vLLM à chaud |
+| `/model [nom]` | Affiche les modèles vLLM détectés ou bascule vers un autre modèle |
 | `/clear` | Efface le terminal et réinitialise la mémoire de la conversation |
 | `/reset` | Réinitialise la conversation sans effacer l'écran |
-| `/model [nom]` | Affiche les modèles vLLM détectés ou bascule vers un autre modèle |
 | `/system [prompt]` | Affiche ou modifie le prompt système à la volée |
 | `/params [options]` | Modifie les paramètres de génération (`/params temp=0.8 max=2048`) |
 | `/retry` | Relance la génération de la dernière réponse de l'assistant |
@@ -98,12 +107,3 @@ uv run client.py [OPTIONS]
 - `--max-tokens <INT>` : Nombre maximum de tokens en réponse (défaut : `4096`)
 - `--no-stats` : Masque la ligne des métriques de vitesse (`tok/s`, durée)
 - `-p, --prompt <TEXTE>` : Envoie le prompt directement sans démarrer la session interactive
-
----
-
-## 📁 Structure du projet
-
-- `client.py` : Script principal du client interactif.
-- `run.sh` : Lanceur bash rapide avec détection automatique de `uv`.
-- `pyproject.toml` : Fichier de projet `uv` avec les dépendances (`openai`, `rich`, `prompt-toolkit`).
-- `.env` : Fichier de configuration d'environnement par défaut.

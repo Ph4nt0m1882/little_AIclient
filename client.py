@@ -2,6 +2,7 @@
 """
 Little AI Client - Client de terminal interactif pour vLLM (compatible API OpenAI).
 Optimisé pour les modèles locaux comme Qwen/Qwen3.8-27B.
+Supporte le formatage ANSI dynamique, la réflexion en gris et la configuration de l'URL du serveur.
 """
 
 from __future__ import annotations
@@ -34,10 +35,11 @@ HISTORY_FILE = Path.home() / ".vllm_client_history"
 
 COMMANDS = [
     "/help",
+    "/url",
+    "/model",
+    "/system",
     "/clear",
     "/reset",
-    "/system",
-    "/model",
     "/params",
     "/retry",
     "/save",
@@ -46,6 +48,288 @@ COMMANDS = [
     "/exit",
     "/quit",
 ]
+
+
+class AnsiMarkdownStreamer:
+    """
+    Streamer en temps réel qui convertit à la volée le Markdown et les balises
+    de réflexion (<think>) en séquences de couleurs et styles ANSI.
+    """
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    GREY = "\033[90m"
+    ITALIC = "\033[3m"
+    UNDERLINE = "\033[4m"
+    CYAN = "\033[36m"
+    BRIGHT_CYAN = "\033[96m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    MAGENTA = "\033[35m"
+    CODE_BG = "\033[48;5;236m\033[38;5;252m"
+
+    def __init__(self, out=None):
+        self.out = out or sys.stdout
+        self.buffer = ""
+        self.in_think_tag = False
+        self.in_reasoning_field = False
+        self.in_bold = False
+        self.in_italic = False
+        self.in_inline_code = False
+        self.in_code_block = False
+        self.code_block_lang = ""
+        self.at_line_start = True
+        self.has_printed_think_header = False
+        self.has_printed_response_header = False
+
+    @property
+    def in_think(self) -> bool:
+        return self.in_think_tag or self.in_reasoning_field
+
+    def write_reasoning(self, text: str) -> None:
+        """Gère le streaming dédié au champ de raisonnement (delta.reasoning_content)."""
+        if not self.in_reasoning_field:
+            self.in_reasoning_field = True
+            if not self.has_printed_think_header:
+                self.out.write(f"\n{self.GREY}💭 [Réflexion]{self.RESET}\n")
+                self.has_printed_think_header = True
+        self.out.write(f"{self.GREY}{text}")
+        self.out.flush()
+
+    def end_reasoning(self) -> None:
+        """Clôture la phase de raisonnement issue de delta.reasoning_content."""
+        if self.in_reasoning_field:
+            self.in_reasoning_field = False
+            self.out.write(self.RESET)
+            if not self.has_printed_response_header:
+                self.out.write(f"\n\n{self.BOLD}{self.BRIGHT_CYAN}💡 [Réponse]{self.RESET}\n")
+                self.has_printed_response_header = True
+            self.at_line_start = True
+            self.out.flush()
+
+    def write(self, text: str) -> None:
+        """Ajoute du texte au buffer et traite les balises & styles Markdown."""
+        self.buffer += text
+        self._process(flush_all=False)
+
+    def flush(self) -> None:
+        """Vide le buffer restant et réinitialise tous les attributs ANSI."""
+        self._process(flush_all=True)
+        if (
+            self.in_think
+            or self.in_bold
+            or self.in_italic
+            or self.in_inline_code
+            or self.in_code_block
+        ):
+            self.out.write(self.RESET)
+        self.out.flush()
+
+    def _process(self, flush_all: bool = False) -> None:
+        i = 0
+        n = len(self.buffer)
+        while i < n:
+            rem = self.buffer[i:]
+
+            # 1. Détection de la balise <think>
+            if not self.in_think_tag and rem.startswith("<think>"):
+                self.in_think_tag = True
+                if not self.has_printed_think_header:
+                    self.out.write(f"\n{self.GREY}💭 [Réflexion]{self.RESET}\n{self.GREY}")
+                    self.has_printed_think_header = True
+                else:
+                    self.out.write(self.GREY)
+                i += 7
+                continue
+
+            # 2. Détection de la balise </think>
+            if self.in_think_tag and rem.startswith("</think>"):
+                self.in_think_tag = False
+                self.out.write(self.RESET)
+                if not self.has_printed_response_header:
+                    self.out.write(f"\n\n{self.BOLD}{self.BRIGHT_CYAN}💡 [Réponse]{self.RESET}\n")
+                    self.has_printed_response_header = True
+                i += 8
+                self.at_line_start = True
+                continue
+
+            # Si on est dans la balise <think>, afficher en gris
+            if self.in_think_tag:
+                if not flush_all and "</think>".startswith(rem):
+                    break
+                self.out.write(self.buffer[i])
+                i += 1
+                continue
+
+            # 3. Blocs de code (```)
+            if rem.startswith("```"):
+                if not self.in_code_block:
+                    nl = self.buffer.find("\n", i + 3)
+                    if nl == -1 and not flush_all:
+                        break
+                    lang = self.buffer[i + 3 : nl].strip() if nl != -1 else ""
+                    self.in_code_block = True
+                    self.code_block_lang = lang
+                    lang_label = f"({lang}) " if lang else ""
+                    self.out.write(f"\n{self.MAGENTA}─── Code {lang_label}────────────────────────{self.RESET}\n{self.CYAN}")
+                    i = nl + 1 if nl != -1 else n
+                    self.at_line_start = True
+                    continue
+                else:
+                    self.in_code_block = False
+                    self.out.write(f"{self.RESET}\n{self.MAGENTA}────────────────────────────────────────{self.RESET}\n")
+                    i += 3
+                    if i < n and self.buffer[i] == "\n":
+                        i += 1
+                    self.at_line_start = True
+                    continue
+
+            if self.in_code_block:
+                if not flush_all and "```".startswith(rem):
+                    break
+                self.out.write(self.buffer[i])
+                i += 1
+                continue
+
+            # 4. Code en ligne (`...`)
+            if self.buffer[i] == "`":
+                self.in_inline_code = not self.in_inline_code
+                self.out.write(self.CODE_BG if self.in_inline_code else self.RESET)
+                i += 1
+                continue
+
+            if self.in_inline_code:
+                self.out.write(self.buffer[i])
+                i += 1
+                continue
+
+            # 5. Gras (**...**)
+            if rem.startswith("**"):
+                self.in_bold = not self.in_bold
+                self.out.write(self.BOLD if self.in_bold else self.RESET)
+                i += 2
+                continue
+
+            # 6. Éléments de début de ligne
+            if self.at_line_start:
+                if rem.startswith("### "):
+                    self.out.write(f"{self.BOLD}{self.YELLOW}")
+                    i += 4
+                    self.at_line_start = False
+                    continue
+                elif rem.startswith("## "):
+                    self.out.write(f"{self.BOLD}{self.BRIGHT_CYAN}")
+                    i += 3
+                    self.at_line_start = False
+                    continue
+                elif rem.startswith("# "):
+                    self.out.write(f"{self.BOLD}{self.UNDERLINE}{self.BRIGHT_CYAN}")
+                    i += 2
+                    self.at_line_start = False
+                    continue
+                elif rem.startswith("- ") or rem.startswith("* "):
+                    self.out.write(f"{self.CYAN}•{self.RESET} ")
+                    i += 2
+                    self.at_line_start = False
+                    continue
+                elif rem.startswith("> "):
+                    self.out.write(f"{self.GREEN}▎{self.RESET} \033[3m")
+                    i += 2
+                    self.at_line_start = False
+                    continue
+                elif rem.startswith("---") or rem.startswith("***"):
+                    nl = self.buffer.find("\n", i)
+                    if nl == -1 and not flush_all:
+                        break
+                    self.out.write(f"{self.GREY}────────────────────────────────────────{self.RESET}\n")
+                    i = nl + 1 if nl != -1 else n
+                    self.at_line_start = True
+                    continue
+
+            # Éviter de couper les balises partielles en streaming
+            if not flush_all:
+                tags = ("<think>", "</think>", "```", "**", "### ", "## ", "# ", "---", "***")
+                if any(t.startswith(rem) for t in tags):
+                    break
+
+            ch = self.buffer[i]
+            self.out.write(ch)
+            if ch == "\n":
+                self.at_line_start = True
+                if self.in_bold:
+                    self.out.write(self.BOLD)
+            else:
+                self.at_line_start = False
+            i += 1
+
+        self.buffer = self.buffer[i:]
+        self.out.flush()
+
+
+def normalize_url(url: str) -> str:
+    """Normalise l'URL du serveur vLLM."""
+    url = url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        url = f"http://{url}"
+    url = url.rstrip("/")
+    if not url.endswith("/v1"):
+        url = f"{url}/v1"
+    return url
+
+
+def update_env_file(url: str) -> None:
+    """Sauvegarde l'URL choisie dans le fichier .env."""
+    try:
+        env_file = Path(".env")
+        lines = []
+        found = False
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                if line.startswith("VLLM_BASE_URL="):
+                    lines.append(f"VLLM_BASE_URL={url}")
+                    found = True
+                else:
+                    lines.append(line)
+        if not found:
+            lines.append(f"VLLM_BASE_URL={url}")
+            lines.append("OPENAI_API_KEY=EMPTY")
+        env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def prompt_for_server_url(default_url: str) -> str:
+    """Demande à l'utilisateur de confirmer ou personnaliser l'URL du serveur au démarrage."""
+    console = Console()
+    console.print()
+    console.print(
+        Panel(
+            f"[white]Appuyez sur [bold cyan]Entrée[/bold cyan] pour utiliser : [bold green]{default_url}[/bold green]\n"
+            "Ou saisissez une nouvelle URL (ex: [cyan]http://localhost:8000[/cyan] ou [cyan]http://192.168.1.50:8000[/cyan]) :[/white]",
+            title="[bold blue]🔗 Connexion au serveur vLLM[/bold blue]",
+            border_style="blue",
+            padding=(0, 2),
+        )
+    )
+
+    session = PromptSession()
+    try:
+        style = Style.from_dict({"prompt": "ansicyan bold"})
+        user_url = session.prompt(
+            f"URL du serveur [{default_url}] > ",
+            style=style,
+        ).strip()
+
+        if not user_url:
+            return default_url
+
+        valid_url = normalize_url(user_url)
+        update_env_file(valid_url)
+        console.print(f"[green]✓ URL sélectionnée : [bold]{valid_url}[/bold][/green]\n")
+        return valid_url
+    except (KeyboardInterrupt, EOFError):
+        console.print(f"\n[dim]Utilisation de l'URL par défaut : {default_url}[/dim]\n")
+        return default_url
 
 
 class ChatClient:
@@ -61,10 +345,7 @@ class ChatClient:
         show_stats: bool = True,
     ):
         self.console = Console()
-        self.base_url = base_url.rstrip("/")
-        if not self.base_url.endswith("/v1"):
-            self.base_url = f"{self.base_url}/v1"
-
+        self.base_url = normalize_url(base_url)
         self.api_key = api_key
         self.client = openai.OpenAI(base_url=self.base_url, api_key=self.api_key)
 
@@ -79,7 +360,7 @@ class ChatClient:
         if self.system_prompt:
             self.messages.append({"role": "system", "content": self.system_prompt})
 
-        # Detect or set model
+        # Détection ou attribution du modèle
         self.available_models = self.fetch_available_models()
         if model:
             self.model = model
@@ -87,6 +368,15 @@ class ChatClient:
             self.model = self.available_models[0]
         else:
             self.model = DEFAULT_MODEL
+
+    def set_url(self, new_url: str) -> None:
+        """Met à jour l'URL du serveur et réinitialise le client."""
+        self.base_url = normalize_url(new_url)
+        self.client = openai.OpenAI(base_url=self.base_url, api_key=self.api_key)
+        self.available_models = self.fetch_available_models()
+        if self.available_models:
+            self.model = self.available_models[0]
+        update_env_file(self.base_url)
 
     def fetch_available_models(self) -> list[str]:
         """Récupère la liste des modèles servis par l'instance vLLM."""
@@ -99,7 +389,7 @@ class ChatClient:
     def print_welcome_banner(self) -> None:
         """Affiche la bannière d'accueil et l'état de la connexion."""
         status_color = "green" if self.available_models else "yellow"
-        status_text = "Connecté" if self.available_models else "Non détecté (démarrage en cours ?)"
+        status_text = "Connecté" if self.available_models else "Non joignable (chargement en cours ?)"
 
         info_table = Table.grid(padding=(0, 2))
         info_table.add_column(style="bold cyan", justify="right")
@@ -124,7 +414,7 @@ class ChatClient:
                 "[yellow]⚠️ Note : Impossible de contacter le serveur vLLM sur "
                 f"{self.base_url}.\n"
                 "Vérifiez que votre conteneur Docker est bien en cours d'exécution.\n"
-                "Tapez [bold]/model[/bold] pour réessayer une fois le conteneur prêt.[/yellow]\n"
+                "Tapez [bold]/url[/bold] pour changer d'adresse ou [bold]/model[/bold] pour réessayer.[/yellow]\n"
             )
 
     def print_help(self) -> None:
@@ -134,9 +424,10 @@ class ChatClient:
         table.add_column("Description", style="white")
 
         table.add_row("/help", "Afficher ce message d'aide")
+        table.add_row("/url [lien]", "Afficher ou modifier l'URL du serveur vLLM")
+        table.add_row("/model [nom]", "Afficher ou changer de modèle actif (recherche auto)")
         table.add_row("/clear", "Effacer l'écran et réinitialiser l'historique de discussion")
         table.add_row("/reset", "Réinitialiser l'historique sans effacer l'écran")
-        table.add_row("/model [nom]", "Afficher ou changer de modèle actif (recherche auto)")
         table.add_row("/system [texte]", "Afficher ou modifier le prompt système")
         table.add_row("/params [options]", "Afficher ou modifier les paramètres (temp=0.7 max=2048)")
         table.add_row("/retry", "Relancer la dernière réponse de l'assistant")
@@ -159,6 +450,16 @@ class ChatClient:
 
         elif cmd == "/help":
             self.print_help()
+
+        elif cmd == "/url":
+            if not arg:
+                self.console.print(f"URL actuelle du serveur : [bold green]{self.base_url}[/bold green]")
+                self.console.print("[dim]Pour la changer : /url http://nouvelle_adresse:8000[/dim]\n")
+            else:
+                self.set_url(arg)
+                status = "Connecté" if self.available_models else "Non joignable"
+                color = "green" if self.available_models else "yellow"
+                self.console.print(f"[{color}]✓ URL mise à jour : {self.base_url} ({status})[/{color}]\n")
 
         elif cmd == "/clear":
             os.system("clear" if os.name == "posix" else "cls")
@@ -290,7 +591,7 @@ class ChatClient:
         return True
 
     def generate_response(self, user_prompt: str) -> None:
-        """Envoie le message à vLLM et affiche la réponse en streaming."""
+        """Envoie le message à vLLM et affiche la réponse en streaming avec formatage ANSI."""
         self.messages.append({"role": "user", "content": user_prompt})
 
         self.console.print(f"\n[bold green]🤖 {self.model}[/bold green] :")
@@ -300,6 +601,8 @@ class ChatClient:
         first_token_time = None
         completion_tokens = 0
         prompt_tokens = 0
+
+        streamer = AnsiMarkdownStreamer()
 
         try:
             stream = self.client.chat.completions.create(
@@ -321,22 +624,35 @@ class ChatClient:
                     continue
 
                 delta = chunk.choices[0].delta
-                content = delta.content
+
+                # 1. Gérer delta.reasoning_content si présent (modèles de réflexion vLLM)
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    if first_token_time is None:
+                        first_token_time = time.perf_counter()
+                    streamer.write_reasoning(reasoning)
+                    completion_tokens += 1
+                    full_response += reasoning
+
+                # 2. Gérer delta.content standard (peut aussi contenir <think>...</think>)
+                content = getattr(delta, "content", None)
                 if content:
                     if first_token_time is None:
                         first_token_time = time.perf_counter()
+                    if streamer.in_reasoning_field:
+                        streamer.end_reasoning()
                     full_response += content
                     completion_tokens += 1
-                    sys.stdout.write(content)
-                    sys.stdout.flush()
+                    streamer.write(content)
 
+            streamer.flush()
             sys.stdout.write("\n")
             sys.stdout.flush()
 
             total_elapsed = time.perf_counter() - start_time
             self.messages.append({"role": "assistant", "content": full_response})
 
-            # Stats line
+            # Ligne de métriques
             if self.show_stats and full_response:
                 ttft = (first_token_time - start_time) if first_token_time else total_elapsed
                 gen_time = (total_elapsed - ttft) if first_token_time else total_elapsed
@@ -348,18 +664,22 @@ class ChatClient:
                 self.console.print(f"[dim]{stats_str}[/dim]")
 
         except KeyboardInterrupt:
+            streamer.flush()
             sys.stdout.write("\n")
             self.console.print("[yellow]⚠️ Génération interrompue par l'utilisateur.[/yellow]")
             if full_response:
                 self.messages.append({"role": "assistant", "content": full_response})
         except openai.APIConnectionError as e:
+            streamer.flush()
             self.console.print(f"\n[bold red]❌ Erreur de connexion au serveur vLLM :[/bold red] {e}")
-            self.console.print(f"[yellow]Vérifiez que le serveur écoute sur {self.base_url} et que le conteneur Docker est actif.[/yellow]")
+            self.console.print(f"[yellow]Vérifiez que le serveur écoute sur {self.base_url} ou tapez [bold]/url[/bold] pour modifier l'adresse.[/yellow]")
             self.messages.pop()
         except openai.APIStatusError as e:
+            streamer.flush()
             self.console.print(f"\n[bold red]❌ Erreur API ({e.status_code}) :[/bold red] {e.message}")
             self.messages.pop()
         except Exception as e:
+            streamer.flush()
             self.console.print(f"\n[bold red]❌ Erreur inattendue :[/bold red] {e}")
             self.messages.pop()
 
@@ -408,7 +728,7 @@ class ChatClient:
 
 
 def run_one_shot(client: ChatClient, prompt: str) -> None:
-    """Mode prompt unique (non interactif ou pipe stdin)."""
+    """Mode prompt unique (non interactif ou pipe stdin) avec formatage ANSI."""
     try:
         stream = client.client.chat.completions.create(
             model=client.model,
@@ -421,11 +741,21 @@ def run_one_shot(client: ChatClient, prompt: str) -> None:
             max_tokens=client.max_tokens,
             stream=True,
         )
+        streamer = AnsiMarkdownStreamer()
         for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                sys.stdout.write(chunk.choices[0].delta.content)
-                sys.stdout.flush()
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    streamer.write_reasoning(reasoning)
+                content = getattr(delta, "content", None)
+                if content:
+                    if streamer.in_reasoning_field:
+                        streamer.end_reasoning()
+                    streamer.write(content)
+        streamer.flush()
         sys.stdout.write("\n")
+        sys.stdout.flush()
     except Exception as e:
         sys.stderr.write(f"Erreur vLLM : {e}\n")
         sys.exit(1)
@@ -490,8 +820,44 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Si stdin est redirigé (pipe), on exécute directement sans poser de question
+    if not sys.stdin.isatty():
+        piped_input = sys.stdin.read().strip()
+        full_prompt = f"{args.prompt}\n\n{piped_input}" if args.prompt else piped_input
+        if full_prompt:
+            chat_client = ChatClient(
+                base_url=args.url,
+                api_key=args.api_key,
+                model=args.model,
+                system_prompt=args.system,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=args.max_tokens,
+                show_stats=not args.no_stats,
+            )
+            run_one_shot(chat_client, full_prompt)
+            return
+
+    # Si l'argument -p est passé, on exécute directement
+    if args.prompt:
+        chat_client = ChatClient(
+            base_url=args.url,
+            api_key=args.api_key,
+            model=args.model,
+            system_prompt=args.system,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_tokens=args.max_tokens,
+            show_stats=not args.no_stats,
+        )
+        run_one_shot(chat_client, args.prompt)
+        return
+
+    # En mode interactif : demander confirmation ou personnalisation de l'URL du serveur
+    selected_url = prompt_for_server_url(args.url)
+
     chat_client = ChatClient(
-        base_url=args.url,
+        base_url=selected_url,
         api_key=args.api_key,
         model=args.model,
         system_prompt=args.system,
@@ -500,17 +866,6 @@ def main() -> None:
         max_tokens=args.max_tokens,
         show_stats=not args.no_stats,
     )
-
-    if not sys.stdin.isatty():
-        piped_input = sys.stdin.read().strip()
-        full_prompt = f"{args.prompt}\n\n{piped_input}" if args.prompt else piped_input
-        if full_prompt:
-            run_one_shot(chat_client, full_prompt)
-            return
-
-    if args.prompt:
-        run_one_shot(chat_client, args.prompt)
-        return
 
     chat_client.run_interactive()
 
